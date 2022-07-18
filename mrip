@@ -25,19 +25,7 @@ if [ "$#" -eq 2 ]; then
 	END=$2
 fi
 
->tmp/nout
->tmp/nmsg
->tmp/time
-
-for n in $(seq $START $END); do
-	for i in {1..60}; do
-		TIME=$(echo "scale=3; $n + $i/60" | bc)
-		yes | ffmpeg -ss $TIME -i tmp/out.mp4 -qscale:v 4 -frames:v 1 tmp/out$i.jpg  >/dev/null 2>&1
-		echo $TIME | tr -d . >tmp/time
-		echo $TIME
-	done
-	./notes
-done
+./notes $START $END
 
 if [ -n "$NAME" ]; then
 	OUT="mid/$(basename "$NAME" | cut -f1 -d '.').mid"
@@ -48,5 +36,4 @@ fi
 ./write
 
 mv out.mid "$OUT"
-rm tmp/*
-
+#rm tmp/*
