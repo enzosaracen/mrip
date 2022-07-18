@@ -1,0 +1,52 @@
+#!/bin/bash
+
+START=0
+END=0
+NAME=""
+
+if [ "$#" -eq 0 ]; then
+	exit 1
+fi
+
+if [ "$#" -ge 1 ]; then
+	NAME=$1
+	WIDTH=$(ffprobe -v error -show_entries stream=width -of default=noprint_wrappers=1 $1 | sed 's/.*=//g')
+	HEIGHT=$(ffprobe -v error -show_entries stream=height -of default=noprint_wrappers=1 $1 | sed 's/.*=//g')
+	yes | ffmpeg -i $1 -filter:v "crop=$WIDTH:2:0:$(($HEIGHT-$HEIGHT/8))" tmp/out.mp4
+fi
+
+if [ "$#" -eq 3 ]; then
+	START=$2
+	END=$3
+fi
+
+if [ "$#" -eq 2 ]; then
+	START=$1
+	END=$2
+fi
+
+>tmp/nout
+>tmp/nmsg
+>tmp/time
+
+for n in $(seq $START $END); do
+	for i in {1..60}; do
+		TIME=$(echo "scale=3; $n + $i/60" | bc)
+		yes | ffmpeg -ss $TIME -i tmp/out.mp4 -qscale:v 4 -frames:v 1 tmp/out$i.jpg  >/dev/null 2>&1
+		echo $TIME | tr -d . >tmp/time
+		echo $TIME
+	done
+	./notes
+done
+
+if [ -n "$NAME" ]; then
+	OUT="mid/$(basename "$NAME" | cut -f1 -d '.').mid"
+else
+	OUT="mid/$(date +"%C.%j.%H.%M.%S").mid"
+fi
+
+./write
+
+mv out.mid "$OUT"
+rm tmp/*
+
