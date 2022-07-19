@@ -9,15 +9,21 @@
 #include <jpeglib.h>
 
 #define H	100
-#define W	1280
+#define W	1500
 #define FS	(1000.0/60.0)
+#define COLDIF	80
+#define KEYDIF	150
 
 typedef uint32_t uint32;
 
 FILE *fout;
 
-int dbg = 0;
-int on[88], keyoff[88], noff, kcnt;
+int dbg = 1;
+int on[88], goff, nkey;
+struct {
+	int pos;
+	int col[3];
+} key[88];
 double tms;
 unsigned vend;
 
@@ -36,6 +42,7 @@ void draw(void)
 	memcpy(scr->pixels, rast, W*H*sizeof(uint32));
 	SDL_UnlockSurface(scr);
 	SDL_UpdateRect(scr, 0, 0, 0, 0);
+	memset(rast, 0, W*H*sizeof(uint32));
 }
 
 void putp(uint32 col, int t, int n)
@@ -65,9 +72,14 @@ int abs(int n)
 	return (n >= 0) ? n : -n;
 }
 
-int ison(int r, int g, int b)
+uint32 rgb(int *s)
 {
-	return (g - (r+b)/2 > 50) || (b - (r+g)/2 > 30);
+	return SDL_MapRGB(scr->format, s[0], s[1], s[2]);
+}
+
+int ccmp(int *s1, int *s2)
+{
+	return (abs(s1[0]-s2[0])+abs(s1[1]-s2[1])+abs(s1[2]-s2[2])) >= COLDIF;
 }
 
 void send(int note, int v)
@@ -103,14 +115,14 @@ void setjpg(void)
 
 void keyscan(void)
 {
-	int i, j, s1[3], s2[3], diff, skip, cnt, prev, pn, sum, bw[88];
+	int i, j, k, s1[3], s2[3], diff, skip, n, prev, sum, bw[88];
 
 loop:
 	frame(tms);
 	setjpg();
-	tms += FS*10;
+	tms += FS*5;
 	skip = 3;
-	pn = cnt = prev = 0;
+	n = prev = 0;
 	for(i = 0; i < jpg.x; i++) {
 		for(j = 0; j < 3; j++)
 			s2[j] = jpg.jdata[i*3 + j];
@@ -118,70 +130,104 @@ loop:
 			diff = 0;
 			for(j = 0; j < 3; j++)
 				diff += abs(s2[j]-s1[j]);
-			if(diff >= 150) {
-				keyoff[cnt++] = (prev+i)/2;
+			if(diff >= KEYDIF || i == jpg.x-1) {
+				key[n].pos = (prev+i)/2;
+				for(k = 0; k < 3; k++)
+					key[n].col[k] = jpg.jdata[key[n].pos*3 + k];
+				n++;
 				prev = i;
 				skip = 3;
 			}
 			if(dbg)
-				putp(SDL_MapRGB(scr->format, s2[0], s2[1], s2[2]), diff >= 150, pn++);
+				putp(rgb(s2), skip > 0, i);
 		} else {
 			if(dbg)
-				putp(SDL_MapRGB(scr->format, s2[0], s2[1], s2[2]), 0, pn++);
+				putp(rgb(s2), 0, i);
 			skip--;
 			}
 		for(j = 0; j < 3; j++)
 			s1[j] = s2[j];
 	}
-	if(cnt < 30) {	/* min keys */
-		printf("skipping %.3f\n", tms/1000.0);
+	if(n < 30) {
+		printf("skipping %.3f (keys=%d < 30)\n", tms/1000.0, n);
 		goto loop;
 	}
-	for(i = 0; i < cnt; i++) {
+	for(i = 0; i < n; i++) {
 		for(j = 0; j < 3; j++)
-			s2[j] = jpg.jdata[keyoff[i]*3 + j];
+			s2[j] = jpg.jdata[key[i].pos*3 + j];
 		sum = (s2[0] + s2[1] + s2[2])/3;
-		if(sum >= 200)
+		if(sum >= 180)
 			bw[i] = 1;
-		else if(sum <= 50)
+		else if(sum <= 60)
 			bw[i] = 0;
 		else {
 			if(dbg)
 				memset(rast, 0, W*H*sizeof(uint32));
-			printf("skiping %.3f\n", tms/1000.0);
+			printf("skipping %.3f (color %d,%d,%d)\n", tms/1000.0, s2[0], s2[1], s2[2]);
 			goto loop;
 		}
 	}
 
 	/* determine global note offset here */
 
-	kcnt = cnt;
+	nkey = n;
 	if(dbg) {
-		printf("keyboard %d (y/n)?\n", cnt);
+		printf("keyboard %d (y/n)?\n", n);
 		draw();
 		if(getchar() != 'y')
 			exit(1);
+	}
+
+	/* the keyboard is still fading in at this point, and need
+	 * to get the stable color values of each key center to know when
+	 * they change and are thus on, so keep running frame by
+	 * frame comparisons until big color change (first note played),
+	 * then assume previous frame off colors will be relatively stable */
+	while(tms <= vend) {
+		tms += FS;
+		printf("keys fading %.3f\n", tms/1000.0);
+		frame(tms);
+		setjpg();
+		for(i = 0; i < nkey; i++) {
+			for(j = 0; j < 3; j++)
+				s1[j] = jpg.jdata[key[i].pos*3 + j];
+			if(ccmp(key[i].col, s1)) {
+				printf("%d: %d,%d,%d   %d,%d,%d", i, s1[0], s1[1], s1[2], key[i].col[0], key[i].col[1], key[i].col[2]);
+				return;
+			}
+			for(j = 0; j < 3; j++)
+				key[i].col[j] = s1[j];
+		}
 	}
 }
 
 int parse(void)
 {
-	int i, j, s[3], black;
+	int i, j, k, t, s[3], black;
 
 	black = 1;
 	frame(tms);
 	setjpg();
-	for(i = 0; i < kcnt; i++) {
+	for(i = 0; i < nkey; i++) {
 		for(j = 0; j < 3; j++)
-			s[j] = jpg.jdata[keyoff[i]*3 + j];
+			s[j] = jpg.jdata[key[i].pos*3 + j];
+
+		/* to stop after keys fade out */
 		if(black && (s[0]+s[1]+s[2])/3 > 50)
 			black = 0;
-		if(ison(s[0], s[1], s[2])) {
+
+		t = ccmp(s, key[i].col);
+		if(dbg)
+			for(k = 0; k < 5; k++)
+				putp(rgb(s), t, key[i].pos+k);
+		if(t) {
 			if(!on[i])
 				send(i, 1);
 		} else if(on[i])
 			send(i, 0);
 	}
+	if(dbg)
+		draw();
 	return black;
 }
 
