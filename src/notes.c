@@ -8,20 +8,26 @@
 #include <unistd.h>
 #include <jpeglib.h>
 
-#define H 100
-#define W 1280
+#define H	100
+#define W	1280
+#define FS	(1000.0/60.0)
 
 typedef uint32_t uint32;
 
 FILE *fout;
 
-int dbg = 0, init = 1;
-int on[88];
-int keyoff[88];
+int dbg = 0;
+int on[88], keyoff[88], noff, kcnt;
 double tms;
+unsigned vend;
 
 uint32 rast[H][W];
 SDL_Surface *scr;
+
+struct {
+	unsigned char *jdata;		
+	unsigned x;
+} jpg;
 
 void draw(void)
 {
@@ -30,13 +36,14 @@ void draw(void)
 	memcpy(scr->pixels, rast, W*H*sizeof(uint32));
 	SDL_UnlockSurface(scr);
 	SDL_UpdateRect(scr, 0, 0, 0, 0);
-	memset(rast, 0, W*H*sizeof(uint32));
 }
 
 void putp(uint32 col, int t, int n)
 {
 	int i;
 
+	if(n >= W)
+		return;
 	if(t) {
 		for(i = 0; i < H/2; i++)
 			rast[i][n] = 0xe10600;
@@ -66,15 +73,14 @@ int ison(int r, int g, int b)
 void send(int note, int v)
 {
 	on[note] = v;
-	
+
 	fprintf(fout, "%u %d: %d\n", (unsigned)tms, note, v);
 }
 
-void parse(void)
+void setjpg(void)
 {
 	FILE *fp;
-	int i, j, x, s1[3], s2[3], diff, skip, cnt, prev, pn;
-	unsigned char *jdata, *rowp[1];
+	unsigned char *rowp[1];
 	struct jpeg_error_mgr err;
 	struct jpeg_decompress_struct info;
 
@@ -84,71 +90,106 @@ void parse(void)
 	jpeg_stdio_src(&info, fp);
 	jpeg_read_header(&info, TRUE);
 	jpeg_start_decompress(&info);
-	x = info.output_width;
-	jdata = malloc(x*3);
-	rowp[0] = jdata + 3*x*info.output_scanline;
+	if(info.output_width != jpg.x) {
+		if(jpg.jdata)
+			free(jpg.jdata);
+		jpg.x = info.output_width;
+		jpg.jdata = malloc(jpg.x*3);
+	}
+	rowp[0]	= jpg.jdata + 3*jpg.x*info.output_scanline;
 	jpeg_read_scanlines(&info, rowp, 1);
+	fclose(fp);
+}
 
-	if(init) {
-		pn = 0;
-		cnt = 0;
-		prev = 0;
-		skip = 3;
-		for(i = 0; i < x; i++) {
+void keyscan(void)
+{
+	int i, j, s1[3], s2[3], diff, skip, cnt, prev, pn, sum, bw[88];
+
+loop:
+	frame(tms);
+	setjpg();
+	tms += FS*10;
+	skip = 3;
+	pn = cnt = prev = 0;
+	for(i = 0; i < jpg.x; i++) {
+		for(j = 0; j < 3; j++)
+			s2[j] = jpg.jdata[i*3 + j];
+		if(skip <= 0) {
+			diff = 0;
 			for(j = 0; j < 3; j++)
-				s2[j] = jdata[i*3 + j];
-			if(skip <= 0) {
-				diff = 0;
-				for(j = 0; j < 3; j++)
-					diff += abs(s2[j]-s1[j]);
-				if(diff >= 150) {
-					keyoff[cnt++] = (prev+i)/2;
-					prev = i;
-					skip = 3;
-				}
-				if(dbg)
-					putp(SDL_MapRGB(scr->format, s2[0], s2[1], s2[2]), diff >= 150, pn++);
-			} else {
-				if(dbg)
-					putp(SDL_MapRGB(scr->format, s2[0], s2[1], s2[2]), 0, pn++);
-				skip--;
+				diff += abs(s2[j]-s1[j]);
+			if(diff >= 150) {
+				keyoff[cnt++] = (prev+i)/2;
+				prev = i;
+				skip = 3;
 			}
-			for(j = 0; j < 3; j++)
-				s1[j] = s2[j];
-		}
-		if(cnt != 88) {
-			if(dbg) {
-				printf("keyboard %d (y/n)?\n", cnt);
-				draw();
-				if(getchar() != 'y')
-					exit(1);
+			if(dbg)
+				putp(SDL_MapRGB(scr->format, s2[0], s2[1], s2[2]), diff >= 150, pn++);
+		} else {
+			if(dbg)
+				putp(SDL_MapRGB(scr->format, s2[0], s2[1], s2[2]), 0, pn++);
+			skip--;
 			}
+		for(j = 0; j < 3; j++)
+			s1[j] = s2[j];
+	}
+	if(cnt < 30) {	/* min keys */
+		printf("skipping %.3f\n", tms/1000.0);
+		goto loop;
+	}
+	for(i = 0; i < cnt; i++) {
+		for(j = 0; j < 3; j++)
+			s2[j] = jpg.jdata[keyoff[i]*3 + j];
+		sum = (s2[0] + s2[1] + s2[2])/3;
+		if(sum >= 200)
+			bw[i] = 1;
+		else if(sum <= 50)
+			bw[i] = 0;
+		else {
+			if(dbg)
+				memset(rast, 0, W*H*sizeof(uint32));
+			printf("skiping %.3f\n", tms/1000.0);
+			goto loop;
 		}
-		init = 0;
-		free(jdata);
-		fclose(fp);
-		return;
 	}
 
-	for(i = 0; i < 88; i++) {
+	/* determine global note offset here */
+
+	kcnt = cnt;
+	if(dbg) {
+		printf("keyboard %d (y/n)?\n", cnt);
+		draw();
+		if(getchar() != 'y')
+			exit(1);
+	}
+}
+
+int parse(void)
+{
+	int i, j, s[3], black;
+
+	black = 1;
+	frame(tms);
+	setjpg();
+	for(i = 0; i < kcnt; i++) {
 		for(j = 0; j < 3; j++)
-			s1[j] = jdata[keyoff[i]*3 + j];
-		if(ison(s1[0], s1[1], s1[2])) {
+			s[j] = jpg.jdata[keyoff[i]*3 + j];
+		if(black && (s[0]+s[1]+s[2])/3 > 50)
+			black = 0;
+		if(ison(s[0], s[1], s[2])) {
 			if(!on[i])
 				send(i, 1);
 		} else if(on[i])
 			send(i, 0);
 	}
-	free(jdata);
-	fclose(fp);
+	return black;
 }
 
 int main(int argc, char *argv[])
 {
-	int i, j, start, end;
-
-	if(argc != 3)
+	if(argc != 2)
 		return 1;
+	vend = atof(argv[1])*1000;
 	fout = fopen("tmp/nout", "w");
 	if(dbg) {
 		if(SDL_Init(SDL_INIT_VIDEO) < 0)
@@ -157,25 +198,17 @@ int main(int argc, char *argv[])
 		if(scr == NULL)
 			return 1;
 	}
+	keyscan();
+	while(tms <= vend) {
+		if(parse())
+			break;
+		printf("%.3f\n", tms/1000.0);
+		tms += FS;
 
-	start = atoi(argv[1]);
-	end = atoi(argv[2]);
-	tms = start*1000;
-
-	frame((start+end)/2.0*1000);
-	parse();
-	for(i = start; i <= end; i++) {
-		for(j = 0; j < 60; j++) {
-			frame(tms);
-			parse();
-			tms += (1000.0/60.0);
-			printf("%.3f\n", tms/1000.0);
-		}
-		/* to check midi throughout */
+ 		/* to check midi throughout */
 		fclose(fout);
 		fout = fopen("tmp/nout", "a");
 	}
-
 	fclose(fout);
 	if(dbg)
 		SDL_Quit();
