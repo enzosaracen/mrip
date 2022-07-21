@@ -8,11 +8,45 @@
 #include <unistd.h>
 #include <jpeglib.h>
 
-#define H	100
+/*
+ *	current problems:
+ *
+ * 	- need to detect global note offset within keyscan, but this is trivial
+ *
+ * 	- may want to formalize black/white detection in keyscan
+ *
+ *	- no automatic y position detection
+ *		can implement by pulling jpeg of entire vid
+ *		and having keyscan() search through all scanlines until finding
+ *		valid keyboard, then have video cropped and start processing
+ *
+ *		additional pro:	it would remove most of the need to have a shell script
+ *
+ *	- newer videos have the key-on colors fade out rather than instantly
+ *	return to baseline, causing longer than wanted notes and the detection of rapid
+ *	hitting of the same note as only one on
+ *		fixing this is messy and it can be ignored with still decent results,
+ *		but can be done by detecting change in on color, recognizing that
+ *		it is not back to baseline, then send off and ignore until it goes back to baseline
+ *		or returns to the on color
+ *		still wouldn't fix problem where there is a glow that comes from the notes
+ *		and interferes with nearby keys leading to false ons - this is pretty much unfixable
+ *
+ *	- the detection of keys fading to black to end doesn't work for some videos where
+ *	something is shown on screen before the fading occurs and covers the keys, causing
+ *	random notes to be played at the end of songs
+ *		this is pretty unfixable automatically, and because it doesn't affect the actual
+ *		song it isn't a huge deal, also only happens on some of the newer videos, and it is easy
+ *		to fix manually
+ */
+
+#define H	200	/* debug window */
 #define W	1500
+
 #define FS	(1000.0/60.0)
-#define COLDIF	80
-#define KEYDIF	150
+#define COLDIF	100	/* sum of rgb diffs between base key color (key[i].col) and
+			   current color at key[i].pos to register note on */
+#define KEYDIF	150	/* sum of diff to signal key to key transition during keyscan */
 
 typedef uint32_t uint32;
 
@@ -20,12 +54,14 @@ FILE *fout;
 
 int dbg = 1;
 int on[88], goff, nkey;
+int plum[88];		/* prev frame col luminosities to check if all keys fade to
+			   black (including notes left on) */
 struct {
 	int pos;
 	int col[3];
 } key[88];
 double tms;
-unsigned vend;
+unsigned end;
 
 uint32 rast[H][W];
 SDL_Surface *scr;
@@ -52,24 +88,21 @@ void putp(uint32 col, int t, int n)
 	if(n >= W)
 		return;
 	if(t) {
-		for(i = 0; i < H/2; i++)
+		for(i = 0; i < H/4; i++)
 			rast[i][n] = 0xe10600;
 	}
-	for(i = H/2; i < H; i++)
+	for(i = H/4; i < H/2; i++)
 		rast[i][n] = col;
-}
-
-void frame(double t)
-{
-	char buf[128];
-
-	sprintf(buf, "yes | ffmpeg -ss %.3f -i tmp/out.mp4 -qscale:v 4 -frames:v 1 tmp/out.jpg >/dev/null 2>&1", t/1000.0);
-	system(buf);
 }
 
 int abs(int n)
 {
 	return (n >= 0) ? n : -n;
+}
+
+double lum(double f1, double f2, double f3)
+{
+	return 0.2126*f1 + 0.7152*f2 + 0.0722*f3;
 }
 
 uint32 rgb(int *s)
@@ -113,13 +146,28 @@ void setjpg(void)
 	fclose(fp);
 }
 
+void frame(double t)
+{
+	int i, j, k, s[3];
+	char buf[128];
+
+	sprintf(buf, "yes | ffmpeg -ss %.3f -i tmp/out.mp4 -qscale:v 4 -frames:v 1 tmp/out.jpg >/dev/null 2>&1", t/1000.0);
+	system(buf);
+	setjpg();
+	for(j = 0; j < jpg.x; j++) {
+		for(k = 0; k < 3; k++)
+			s[k] = jpg.jdata[j*3 + k];
+		for(i = H/2; i < H; i++)
+			rast[i][j] = rgb(s);
+	}
+}
+
 void keyscan(void)
 {
-	int i, j, k, s1[3], s2[3], diff, skip, n, prev, sum, bw[88];
+	int i, j, k, s1[3], s2[3], col, diff, skip, n, prev, sum, bw[88];
 
 loop:
 	frame(tms);
-	setjpg();
 	tms += FS*5;
 	skip = 3;
 	n = prev = 0;
@@ -148,8 +196,8 @@ loop:
 		for(j = 0; j < 3; j++)
 			s1[j] = s2[j];
 	}
-	if(n < 30) {
-		printf("skipping %.3f (keys=%d < 30)\n", tms/1000.0, n);
+	if(n < 50 || n > 88) {
+		printf("skipping %.3f (keys=%d)\n", tms/1000.0, n);
 		goto loop;
 	}
 	for(i = 0; i < n; i++) {
@@ -163,7 +211,7 @@ loop:
 		else {
 			if(dbg)
 				memset(rast, 0, W*H*sizeof(uint32));
-			printf("skipping %.3f (color %d,%d,%d)\n", tms/1000.0, s2[0], s2[1], s2[2]);
+			printf("skipping %.3f (bad color)\n", tms/1000.0);
 			goto loop;
 		}
 	}
@@ -182,44 +230,46 @@ loop:
 	 * to get the stable color values of each key center to know when
 	 * they change and are thus on, so keep running frame by
 	 * frame comparisons until big color change (first note played),
-	 * then assume previous frame off colors will be relatively stable */
-	while(tms <= vend) {
+	 * then assume colors from the previous frame will be relatively stable */
+	col = 0;
+	while(!col && tms <= end) {
 		tms += FS;
-		printf("keys fading %.3f\n", tms/1000.0);
+		printf("keys fading in %.3f\n", tms/1000.0);
 		frame(tms);
-		setjpg();
 		for(i = 0; i < nkey; i++) {
 			for(j = 0; j < 3; j++)
 				s1[j] = jpg.jdata[key[i].pos*3 + j];
 			if(ccmp(key[i].col, s1)) {
-				printf("%d: %d,%d,%d   %d,%d,%d", i, s1[0], s1[1], s1[2], key[i].col[0], key[i].col[1], key[i].col[2]);
-				return;
+				printf("first note(s): %d,%d,%d   %d,%d,%d\n", key[i].col[0], key[i].col[1], key[i].col[2], s1[0], s1[1], s1[2]);
+				col = 1;
+				send(i, 1);
 			}
-			for(j = 0; j < 3; j++)
-				key[i].col[j] = s1[j];
+			if(!col)
+				for(j = 0; j < 3; j++)
+					key[i].col[j] = s1[j];
 		}
 	}
 }
 
 int parse(void)
 {
-	int i, j, k, t, s[3], black;
+	int i, j, t, s[3], fade;
 
-	black = 1;
+	fade = 1;
 	frame(tms);
-	setjpg();
 	for(i = 0; i < nkey; i++) {
 		for(j = 0; j < 3; j++)
 			s[j] = jpg.jdata[key[i].pos*3 + j];
 
-		/* to stop after keys fade out */
-		if(black && (s[0]+s[1]+s[2])/3 > 50)
-			black = 0;
+		t = lum(s[0], s[1], s[2]);
+		if(plum[i]-t <= 0)
+			fade = 0;
+		plum[i] = t;
 
 		t = ccmp(s, key[i].col);
 		if(dbg)
-			for(k = 0; k < 5; k++)
-				putp(rgb(s), t, key[i].pos+k);
+			for(j = 0; j < 5; j++)
+				putp(rgb(s), t, key[i].pos+j);
 		if(t) {
 			if(!on[i])
 				send(i, 1);
@@ -228,14 +278,14 @@ int parse(void)
 	}
 	if(dbg)
 		draw();
-	return black;
+	return fade;
 }
 
 int main(int argc, char *argv[])
 {
 	if(argc != 2)
 		return 1;
-	vend = atof(argv[1])*1000;
+	end = atof(argv[1])*1000;
 	fout = fopen("tmp/nout", "w");
 	if(dbg) {
 		if(SDL_Init(SDL_INIT_VIDEO) < 0)
@@ -245,9 +295,11 @@ int main(int argc, char *argv[])
 			return 1;
 	}
 	keyscan();
-	while(tms <= vend) {
-		if(parse())
+	while(tms <= end) {
+		if(parse()) {
+			printf("notes faded\n");
 			break;
+		}
 		printf("%.3f\n", tms/1000.0);
 		tms += FS;
 

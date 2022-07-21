@@ -1,12 +1,12 @@
 CC	= gcc
 CF	= -Wall -Wextra -g
 
-BIN	= notes \
+BIN	= rip \
 	  write
 
 all:	$(BIN)
 
-notes:	src/notes.c
+rip:	src/rip.c
 	$(CC) $< -o $@ $(CF) -ljpeg $(shell sdl-config --cflags --libs) -lm
 
 write:	src/write.c
@@ -15,4 +15,4 @@ write:	src/write.c
 .PHONY:	clean
 
 clean:
-	rm -f $(BIN) tmp/*
+	rm -f $(BIN) out.mid tmp/*

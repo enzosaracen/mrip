@@ -4,9 +4,6 @@
 typedef uint32_t uint32;
 
 FILE *fp;
-
-int prev[88];
-
 unsigned siz;
 
 void put(int n, uint32 v)
@@ -47,7 +44,7 @@ void delta(uint32 ms)
 
 int main(void)
 {
-	int i, note, on;
+	int note, on;
 	long ms1, ms2;
 	fpos_t chsiz;
 	FILE *fin;
@@ -68,16 +65,11 @@ int main(void)
 	siz = 0;
 	put(3, 0xc001);
 
-	for(i = 0; i < 88; i++)
-		prev[i] = -1;
 	while(fscanf(fin, "%ld %d: %d\n", &ms2, &note, &on) && !feof(fin)) {
 		if(ms1 == -1)
 			delta(0);
 		else
 			delta(ms2-ms1);
-		if(prev[note] == on)
-			printf("bad note %d\n", note);
-		prev[note] = on;
 		put(1, on ? 0x90 : 0x80);
 		put(1, note+20);
 		put(1, 127);
