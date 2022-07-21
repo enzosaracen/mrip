@@ -20,8 +20,6 @@
  *		and having keyscan() search through all scanlines until finding
  *		valid keyboard, then have video cropped and start processing
  *
- *		additional pro:	it would remove most of the need to have a shell script
- *
  *	- newer videos have the key-on colors fade out rather than instantly
  *	return to baseline, causing longer than wanted notes and the detection of rapid
  *	hitting of the same note as only one on
@@ -41,35 +39,31 @@
  */
 
 #define H	200	/* debug window */
-#define W	1500
-
+#define W	1900
 #define FS	(1000.0/60.0)
-#define COLDIF	100	/* sum of rgb diffs between base key color (key[i].col) and
-			   current color at key[i].pos to register note on */
-#define KEYDIF	150	/* sum of diff to signal key to key transition during keyscan */
+#define COLDIF	100	/* sum of rgb diff to signal key on */
+#define KEYDIF	150	/* sum of rgb diff to signal key to key transition during keyscan */
 
+typedef uint8_t uint8;
 typedef uint32_t uint32;
 
 FILE *fout;
-
 int dbg = 1;
 int on[88], goff, nkey;
-int plum[88];		/* prev frame col luminosities to check if all keys fade to
-			   black (including notes left on) */
+int plum[88];
 struct {
 	int pos;
-	int col[3];
+	uint8 col[3];
 } key[88];
+struct {
+	uint8 *jdata;		
+	unsigned x;
+} jpg;
 double tms;
 unsigned end;
 
 uint32 rast[H][W];
 SDL_Surface *scr;
-
-struct {
-	unsigned char *jdata;		
-	unsigned x;
-} jpg;
 
 void draw(void)
 {
@@ -81,44 +75,29 @@ void draw(void)
 	memset(rast, 0, W*H*sizeof(uint32));
 }
 
-void putp(uint32 col, int t, int n)
-{
-	int i;
-
-	if(n >= W)
-		return;
-	if(t) {
-		for(i = 0; i < H/4; i++)
-			rast[i][n] = 0xe10600;
-	}
-	for(i = H/4; i < H/2; i++)
-		rast[i][n] = col;
-}
-
 int abs(int n)
 {
 	return (n >= 0) ? n : -n;
 }
 
-double lum(double f1, double f2, double f3)
+double lum(uint8 *s)
 {
-	return 0.2126*f1 + 0.7152*f2 + 0.0722*f3;
+	return 0.2126*((double)s[0]) + 0.7152*((double)s[1]) + 0.0722*((double)s[2]);
 }
 
-uint32 rgb(int *s)
+uint32 rgb(uint8 *s)
 {
 	return SDL_MapRGB(scr->format, s[0], s[1], s[2]);
 }
 
-int ccmp(int *s1, int *s2)
+int ccmp(uint8 *s1, uint8 *s2, int dif)
 {
-	return (abs(s1[0]-s2[0])+abs(s1[1]-s2[1])+abs(s1[2]-s2[2])) >= COLDIF;
+	return (abs(s1[0]-s2[0])+abs(s1[1]-s2[1])+abs(s1[2]-s2[2])) >= dif;
 }
 
 void send(int note, int v)
 {
 	on[note] = v;
-
 	fprintf(fout, "%u %d: %d\n", (unsigned)tms, note, v);
 }
 
@@ -148,84 +127,77 @@ void setjpg(void)
 
 void frame(double t)
 {
-	int i, j, k, s[3];
+	int i, j;
 	char buf[128];
+	uint32 col;
 
 	sprintf(buf, "yes | ffmpeg -ss %.3f -i tmp/out.mp4 -qscale:v 4 -frames:v 1 tmp/out.jpg >/dev/null 2>&1", t/1000.0);
 	system(buf);
 	setjpg();
-	for(j = 0; j < jpg.x; j++) {
-		for(k = 0; k < 3; k++)
-			s[k] = jpg.jdata[j*3 + k];
-		for(i = H/2; i < H; i++)
-			rast[i][j] = rgb(s);
+	if(dbg)
+		for(i = 0; i < jpg.x && i < W; i++) {
+			col = rgb(jpg.jdata+i*3);
+			for(j = H/2; j < H; j++)
+				rast[j][i] = col;
+		}
+}
+
+int scanl(unsigned char *data)
+{
+	int i, x, n, px, skip, bw[88];
+	uint8 *ps;
+
+	n = px = 0;
+	ps = data;
+	for(x = 1; x < jpg.x; x++) {
+		if(ccmp(ps, data+x*3, KEYDIF) || x == jpg.x-1) {
+			if(dbg && x < W)
+				for(i = 0; i < H/2; i++)
+					rast[i][x] = 0xe10600;
+
+			key[n].pos = (px+x)/2;
+			for(i = 0; i < 3; i++)
+				key[n].col[i] = jpg.jdata[key[n].pos*3+i];
+			n++;
+			skip = (x-px)/5;
+			px = x;
+			x += skip;	/* skip some to avoid black spaces between white keys */
+		}
+		ps = data+x*3;
 	}
+	if(n < 36 || n > 88)
+		return 1;
+	for(x = 0; x < n; x++) {
+		ps = data+key[x].pos*3;
+		px = (ps[0]+ps[1]+ps[2])/3;
+		if(px >= 180)
+			bw[x] = 1;
+		else if(px <= 60)
+			bw[x] = 0;
+		else
+			return 1;
+	}
+	nkey = n;
+	/* determine global key offset here */
+	return 0;
 }
 
 void keyscan(void)
 {
-	int i, j, k, s1[3], s2[3], col, diff, skip, n, prev, sum, bw[88];
+	int i, j, col;
 
-loop:
-	frame(tms);
-	tms += FS*5;
-	skip = 3;
-	n = prev = 0;
-	for(i = 0; i < jpg.x; i++) {
-		for(j = 0; j < 3; j++)
-			s2[j] = jpg.jdata[i*3 + j];
-		if(skip <= 0) {
-			diff = 0;
-			for(j = 0; j < 3; j++)
-				diff += abs(s2[j]-s1[j]);
-			if(diff >= KEYDIF || i == jpg.x-1) {
-				key[n].pos = (prev+i)/2;
-				for(k = 0; k < 3; k++)
-					key[n].col[k] = jpg.jdata[key[n].pos*3 + k];
-				n++;
-				prev = i;
-				skip = 3;
-			}
-			if(dbg)
-				putp(rgb(s2), skip > 0, i);
-		} else {
-			if(dbg)
-				putp(rgb(s2), 0, i);
-			skip--;
-			}
-		for(j = 0; j < 3; j++)
-			s1[j] = s2[j];
-	}
-	if(n < 50 || n > 88) {
-		printf("skipping %.3f (keys=%d)\n", tms/1000.0, n);
-		goto loop;
-	}
-	for(i = 0; i < n; i++) {
-		for(j = 0; j < 3; j++)
-			s2[j] = jpg.jdata[key[i].pos*3 + j];
-		sum = (s2[0] + s2[1] + s2[2])/3;
-		if(sum >= 180)
-			bw[i] = 1;
-		else if(sum <= 60)
-			bw[i] = 0;
-		else {
-			if(dbg)
-				memset(rast, 0, W*H*sizeof(uint32));
-			printf("skipping %.3f (bad color)\n", tms/1000.0);
-			goto loop;
-		}
-	}
-
-	/* determine global note offset here */
-
-	nkey = n;
+	do {
+		if(dbg)
+			draw();
+		frame(tms);
+		tms += FS*5;
+	} while(scanl(jpg.jdata) && tms <= end);
 	if(dbg) {
-		printf("keyboard %d (y/n)?\n", n);
+		printf("keyboard %d (y/n)?\n", nkey);
 		draw();
 		if(getchar() != 'y')
 			exit(1);
 	}
-
 	/* the keyboard is still fading in at this point, and need
 	 * to get the stable color values of each key center to know when
 	 * they change and are thus on, so keep running frame by
@@ -236,40 +208,36 @@ loop:
 		tms += FS;
 		printf("keys fading in %.3f\n", tms/1000.0);
 		frame(tms);
+		if(dbg)
+			draw();
 		for(i = 0; i < nkey; i++) {
-			for(j = 0; j < 3; j++)
-				s1[j] = jpg.jdata[key[i].pos*3 + j];
-			if(ccmp(key[i].col, s1)) {
-				printf("first note(s): %d,%d,%d   %d,%d,%d\n", key[i].col[0], key[i].col[1], key[i].col[2], s1[0], s1[1], s1[2]);
+			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, COLDIF)) {
 				col = 1;
 				send(i, 1);
 			}
 			if(!col)
 				for(j = 0; j < 3; j++)
-					key[i].col[j] = s1[j];
+					key[i].col[j] = jpg.jdata[key[i].pos*3+j];
 		}
 	}
 }
 
 int parse(void)
 {
-	int i, j, t, s[3], fade;
+	int i, j, t, fade;
 
-	fade = 1;
+	fade = nkey/2;
 	frame(tms);
 	for(i = 0; i < nkey; i++) {
-		for(j = 0; j < 3; j++)
-			s[j] = jpg.jdata[key[i].pos*3 + j];
-
-		t = lum(s[0], s[1], s[2]);
-		if(plum[i]-t <= 0)
-			fade = 0;
+		t = lum(jpg.jdata+key[i].pos*3);
+		if(fade > 0 && plum[i]-t <= 0)
+			fade--;
 		plum[i] = t;
 
-		t = ccmp(s, key[i].col);
-		if(dbg)
-			for(j = 0; j < 5; j++)
-				putp(rgb(s), t, key[i].pos+j);
+		t = ccmp(jpg.jdata+key[i].pos*3, key[i].col, COLDIF);
+		if(dbg && t)
+			for(j = 0; j < H/2; j++)
+				rast[j][key[i].pos] = 0xe10600;
 		if(t) {
 			if(!on[i])
 				send(i, 1);
