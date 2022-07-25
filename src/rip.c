@@ -8,40 +8,11 @@
 #include <unistd.h>
 #include <jpeglib.h>
 
-/*
- *	current problems:
- *
- * 	- need to detect global note offset within keyscan, but this is trivial
- *
- * 	- may want to formalize black/white detection in keyscan
- *
- *	- no automatic y position detection
- *		can implement by pulling jpeg of entire vid
- *		and having keyscan() search through all scanlines until finding
- *		valid keyboard, then have video cropped and start processing
- *
- *	- newer videos have the key-on colors fade out rather than instantly
- *	return to baseline, causing longer than wanted notes and the detection of rapid
- *	hitting of the same note as only one on
- *		fixing this is messy and it can be ignored with still decent results,
- *		but can be done by detecting change in on color, recognizing that
- *		it is not back to baseline, then send off and ignore until it goes back to baseline
- *		or returns to the on color
- *		still wouldn't fix problem where there is a glow that comes from the notes
- *		and interferes with nearby keys leading to false ons - this is pretty much unfixable
- *
- *	- the detection of keys fading to black to end doesn't work for some videos where
- *	something is shown on screen before the fading occurs and covers the keys, causing
- *	random notes to be played at the end of songs
- *		this is pretty unfixable automatically, and because it doesn't affect the actual
- *		song it isn't a huge deal, also only happens on some of the newer videos, and it is easy
- *		to fix manually
- */
-
-#define H		200	/* debug window */
+#define H		200
 #define W		1900
 #define FS		(1000.0/60.0)
 
+#define GRAYDIF		50
 #define KEYDIF		75
 #define COLDIF		100
 #define BIGDIF		150
@@ -50,7 +21,7 @@ typedef uint8_t uint8;
 typedef uint32_t uint32;
 
 FILE *fout;
-int dbg = 1;
+int dbg = 0;
 int on[88], piano[88], goff, nkey;
 int octave[12] = {1,0,1,0,1,1,0,1,0,1,0,1};
 struct {
@@ -96,7 +67,7 @@ int isbw(uint8 *s)
 {
 	int sum;
 
-	if(abs(s[0]-(s[1]+s[2])/2) > 40 || abs(s[1]-(s[0]+s[2])/2) > 40 || abs(s[2]-(s[0]+s[1])/2) > 40)
+	if(abs(s[0]-(s[1]+s[2])/2) > GRAYDIF || abs(s[1]-(s[0]+s[2])/2) > GRAYDIF || abs(s[2]-(s[0]+s[1])/2) > GRAYDIF) 
 		return -1;
 	sum = s[0]+s[1]+s[2];
 	if(sum <= 200)
@@ -112,14 +83,18 @@ void send(int note, int v)
 	fprintf(fout, "%u %d: %d\n", (unsigned)tms, note+goff, v);
 }
 
-void setjpg(void)
+void frame(double t)
 {
+	int i, j;
+	char buf[128];
+	uint32 col;
 	FILE *fp;
 	unsigned char *rowp[1];
 	struct jpeg_error_mgr err;
 	struct jpeg_decompress_struct info;
 
-	fp = fopen("tmp/out.jpg", "r");
+	sprintf(buf, "ffmpeg -ss %.3f -i tmp/out.mp4 -qscale:v 4 -frames:v 1 -f image2 pipe:1 2>/dev/null", t/1000.0);
+	fp = popen(buf, "r");
 	info.err = jpeg_std_error(&err);
 	jpeg_create_decompress(&info);
 	jpeg_stdio_src(&info, fp);
@@ -133,18 +108,8 @@ void setjpg(void)
 	}
 	rowp[0]	= jpg.jdata + 3*jpg.x*info.output_scanline;
 	jpeg_read_scanlines(&info, rowp, 1);
-	fclose(fp);
-}
+	pclose(fp);
 
-void frame(double t)
-{
-	int i, j;
-	char buf[128];
-	uint32 col;
-
-	sprintf(buf, "yes | ffmpeg -ss %.3f -i tmp/out.mp4 -qscale:v 4 -frames:v 1 tmp/out.jpg >/dev/null 2>&1", t/1000.0);
-	system(buf);
-	setjpg();
 	if(dbg)
 		for(i = 0; i < jpg.x && i < W; i++) {
 			col = rgb(jpg.jdata+i*3);
@@ -159,7 +124,7 @@ int scanl(unsigned char *data)
 	uint8 *ps;
 
 	n = px = 0;
-	ps = data+(jpg.x/100-1)*3;	/* skip first few pixels */
+	ps = data+(jpg.x/100-1)*3;
 	for(x = jpg.x/100; x < jpg.x; x++) {
 		if(ccmp(ps, data+x*3, KEYDIF) || x == jpg.x-1) {
 			if(dbg && x < W)
@@ -178,7 +143,7 @@ int scanl(unsigned char *data)
 		ps = data+x*3;
 	}
 
-	if(n < 12)
+	if(n < 36)
 		return 1;
 	for(i = 0; i < n; i++)
 		if((bw[i] = isbw(data+key[i].pos*3)) < 0)
@@ -241,7 +206,7 @@ void keyscan(void)
 		if(dbg)
 			draw();
 		for(i = 0; i < nkey; i++) {
-			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, BIGDIF)) {
+			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, BIGDIF) && isbw(jpg.jdata+key[i].pos*3) < 0) {
 				col = 1;
 				send(i, 1);
 			}
@@ -265,22 +230,20 @@ int parse(void)
 			for(j = 0; j < H/2; j++)
 				rast[j][key[i].pos] = 0xe10600;
 		if(t) {
-			if(!on[i]) {
-				oncnt++;
+			oncnt++;
+			if(!on[i])
 				sbuf[i] = 1;
-			}
 		} else if(on[i])
 			sbuf[i] = 0;
 	}
 	if(dbg)
 		draw();
-	if(oncnt < nkey/3) {
-		for(i = 0; i < nkey; i++)
-			if(sbuf[i] != -1)
-				send(i, sbuf[i]);
-		return 0;
-	}
-	return 1;
+	if(oncnt > nkey/3)
+		return 1;
+	for(i = 0; i < nkey; i++)
+		if(sbuf[i] != -1)
+			send(i, sbuf[i]);
+	return 0;
 }
 
 int main(int argc, char *argv[])

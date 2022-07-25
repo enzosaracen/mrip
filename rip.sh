@@ -1,6 +1,6 @@
 #!/bin/bash
 
-FOPT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/mp4"
+FOPT="bestvideo[ext=mp4]"
 
 for v in "$@"; do
 	pushd vid
