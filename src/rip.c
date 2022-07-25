@@ -38,19 +38,21 @@
  *		to fix manually
  */
 
-#define H	200	/* debug window */
-#define W	1900
-#define FS	(1000.0/60.0)
-#define COLDIF	100	/* sum of rgb diff to signal key on */
-#define KEYDIF	150	/* sum of rgb diff to signal key to key transition during keyscan */
+#define H		200	/* debug window */
+#define W		1900
+#define FS		(1000.0/60.0)
+
+#define KEYDIF		75
+#define COLDIF		100
+#define BIGDIF		150
 
 typedef uint8_t uint8;
 typedef uint32_t uint32;
 
 FILE *fout;
 int dbg = 1;
-int on[88], goff, nkey;
-int plum[88];
+int on[88], piano[88], goff, nkey;
+int octave[12] = {1,0,1,0,1,1,0,1,0,1,0,1};
 struct {
 	int pos;
 	uint8 col[3];
@@ -80,11 +82,6 @@ int abs(int n)
 	return (n >= 0) ? n : -n;
 }
 
-double lum(uint8 *s)
-{
-	return 0.2126*((double)s[0]) + 0.7152*((double)s[1]) + 0.0722*((double)s[2]);
-}
-
 uint32 rgb(uint8 *s)
 {
 	return SDL_MapRGB(scr->format, s[0], s[1], s[2]);
@@ -95,10 +92,24 @@ int ccmp(uint8 *s1, uint8 *s2, int dif)
 	return (abs(s1[0]-s2[0])+abs(s1[1]-s2[1])+abs(s1[2]-s2[2])) >= dif;
 }
 
+int isbw(uint8 *s)
+{
+	int sum;
+
+	if(abs(s[0]-(s[1]+s[2])/2) > 40 || abs(s[1]-(s[0]+s[2])/2) > 40 || abs(s[2]-(s[0]+s[1])/2) > 40)
+		return -1;
+	sum = s[0]+s[1]+s[2];
+	if(sum <= 200)
+		return 0;
+	if(sum >= 500)
+		return 1;	
+	return -1;
+}
+
 void send(int note, int v)
 {
 	on[note] = v;
-	fprintf(fout, "%u %d: %d\n", (unsigned)tms, note, v);
+	fprintf(fout, "%u %d: %d\n", (unsigned)tms, note+goff, v);
 }
 
 void setjpg(void)
@@ -144,41 +155,60 @@ void frame(double t)
 
 int scanl(unsigned char *data)
 {
-	int i, x, n, px, skip, bw[88];
+	int i, j, x, n, px, skip, bw[88], off[8], noff;
 	uint8 *ps;
 
 	n = px = 0;
-	ps = data;
-	for(x = 1; x < jpg.x; x++) {
+	ps = data+(jpg.x/100-1)*3;	/* skip first few pixels */
+	for(x = jpg.x/100; x < jpg.x; x++) {
 		if(ccmp(ps, data+x*3, KEYDIF) || x == jpg.x-1) {
 			if(dbg && x < W)
 				for(i = 0; i < H/2; i++)
 					rast[i][x] = 0xe10600;
-
+			if(n >= 88)
+				return 1;
 			key[n].pos = (px+x)/2;
 			for(i = 0; i < 3; i++)
 				key[n].col[i] = jpg.jdata[key[n].pos*3+i];
 			n++;
-			skip = (x-px)/5;
+			skip = (x-px)/2;
 			px = x;
-			x += skip;	/* skip some to avoid black spaces between white keys */
+			x += skip;	/* skip to avoid black spaces between white keys */
 		}
 		ps = data+x*3;
 	}
-	if(n < 36 || n > 88)
+
+	if(n < 12)
 		return 1;
-	for(x = 0; x < n; x++) {
-		ps = data+key[x].pos*3;
-		px = (ps[0]+ps[1]+ps[2])/3;
-		if(px >= 180)
-			bw[x] = 1;
-		else if(px <= 60)
-			bw[x] = 0;
-		else
+	for(i = 0; i < n; i++)
+		if((bw[i] = isbw(data+key[i].pos*3)) < 0)
 			return 1;
+	if(n < 88) {
+		noff = 0;
+		for(i = 0; i < 88-n; i++)
+			for(j = 0; j < n; j++) {
+				if(bw[j] != piano[j+i])
+					break;
+				if(j == n-1)
+					off[noff++] = i;
+			}
+		if(noff == 0)
+			return 1;
+		i = 0;
+		if(noff > 1) {
+			printf("ambiguous %d key layout (%d possible offsets):  ", n, noff);
+			for(j = 0; j < noff; j++)
+				printf("%d %c", off[j], j == noff-1 ? '\n' : ' ');
+			printf("enter choice (0-%d):\n", noff-1);
+			i = getchar()-'0';
+			if(i < 0 || i >= noff)
+				exit(1);
+			while((j = getchar()) != '\n' && j != EOF);
+		}
+		goff = off[i];
+		printf("note offset: %d\n", goff);
 	}
 	nkey = n;
-	/* determine global key offset here */
 	return 0;
 }
 
@@ -189,29 +219,29 @@ void keyscan(void)
 	do {
 		if(dbg)
 			draw();
+		if(tms >= end) {
+			printf("no keyboard found\n");
+			exit(1);
+		}
 		frame(tms);
+		printf("skipping %.3f\n", tms/1000.0);
 		tms += FS*5;
-	} while(scanl(jpg.jdata) && tms <= end);
+	} while(scanl(jpg.jdata));
 	if(dbg) {
 		printf("keyboard %d (y/n)?\n", nkey);
 		draw();
 		if(getchar() != 'y')
 			exit(1);
 	}
-	/* the keyboard is still fading in at this point, and need
-	 * to get the stable color values of each key center to know when
-	 * they change and are thus on, so keep running frame by
-	 * frame comparisons until big color change (first note played),
-	 * then assume colors from the previous frame will be relatively stable */
 	col = 0;
 	while(!col && tms <= end) {
 		tms += FS;
-		printf("keys fading in %.3f\n", tms/1000.0);
+		printf("waiting for note %.3f\n", tms/1000.0);
 		frame(tms);
 		if(dbg)
 			draw();
 		for(i = 0; i < nkey; i++) {
-			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, COLDIF)) {
+			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, BIGDIF)) {
 				col = 1;
 				send(i, 1);
 			}
@@ -224,33 +254,39 @@ void keyscan(void)
 
 int parse(void)
 {
-	int i, j, t, fade;
+	int i, j, t, sbuf[88], oncnt;
 
-	fade = nkey/2;
 	frame(tms);
+	oncnt = 0;
 	for(i = 0; i < nkey; i++) {
-		t = lum(jpg.jdata+key[i].pos*3);
-		if(fade > 0 && plum[i]-t <= 0)
-			fade--;
-		plum[i] = t;
-
+		sbuf[i] = -1;
 		t = ccmp(jpg.jdata+key[i].pos*3, key[i].col, COLDIF);
 		if(dbg && t)
 			for(j = 0; j < H/2; j++)
 				rast[j][key[i].pos] = 0xe10600;
 		if(t) {
-			if(!on[i])
-				send(i, 1);
+			if(!on[i]) {
+				oncnt++;
+				sbuf[i] = 1;
+			}
 		} else if(on[i])
-			send(i, 0);
+			sbuf[i] = 0;
 	}
 	if(dbg)
 		draw();
-	return fade;
+	if(oncnt < nkey/3) {
+		for(i = 0; i < nkey; i++)
+			if(sbuf[i] != -1)
+				send(i, sbuf[i]);
+		return 0;
+	}
+	return 1;
 }
 
 int main(int argc, char *argv[])
 {
+	int i, j;
+
 	if(argc != 2)
 		return 1;
 	end = atof(argv[1])*1000;
@@ -262,6 +298,15 @@ int main(int argc, char *argv[])
 		if(scr == NULL)
 			return 1;
 	}
+
+	piano[0] = 1;
+	piano[1] = 0;
+	piano[2] = 1;
+	for(i = 0; i < 7; i++)
+		for(j = 0; j < 12; j++)
+			piano[i*12+j+3] = octave[j];
+	piano[87] = 1;
+	
 	keyscan();
 	while(tms <= end) {
 		if(parse()) {

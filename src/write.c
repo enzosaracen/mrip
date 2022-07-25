@@ -71,7 +71,7 @@ int main(void)
 		else
 			delta(ms2-ms1);
 		put(1, on ? 0x90 : 0x80);
-		put(1, note+20);
+		put(1, note+21);
 		put(1, 127);
 		ms1 = ms2;
 	}
