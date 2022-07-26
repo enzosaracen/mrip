@@ -9,10 +9,8 @@ for v in "$@"; do
 
 	NAME="vid/$(yt-dlp -f "$FOPT" $v --get-filename)"
 	LEN=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$NAME")
-	HEIGHT=$(ffprobe -v error -show_entries stream=height -of default=noprint_wrappers=1 "$NAME" | sed 's/.*=//g')
-	yes | ffmpeg -i "$NAME" -filter:v "crop=iw:2:0:$(($HEIGHT-$HEIGHT/8))" tmp/out.mp4
 
-	./rip $LEN
+	./rip "$NAME" $LEN
 	OUT="mid/$(basename "$NAME" | cut -f1 -d '.').mid"
 	./write
 	cp out.mid "$OUT"
