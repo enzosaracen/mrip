@@ -23,7 +23,7 @@ typedef uint32_t uint32;
 
 FILE *fout;
 int dbg = 1;
-int on[88], piano[88], goff, nkey;
+int on[88], piano[88], goff, nkey, choice = -1;
 int octave[12] = {1,0,1,0,1,1,0,1,0,1,0,1};
 struct {
 	int pos;
@@ -116,13 +116,12 @@ void frame(double t, int full)
 	if(!full) {
 		rowp[0] = jpg.jdata;
 		jpeg_read_scanlines(&info, rowp, 1);
-		if(dbg) {
+		if(dbg)
 			for(i = 0; i < jpg.x && i < W; i++) {
 				col = rgb(jpg.jdata+i*3);
 				for(j = H/2; j < H; j++)
 					rast[j][i] = col;
 			}
-		}
 	} else {
 		j = 0;
 		for(f = 0; f < 1; f += 1.0/YSLICE) {
@@ -187,7 +186,7 @@ int scanl(unsigned char *data)
 		if(noff == 0)
 			return 1;
 		i = 0;
-		if(noff > 1) {
+		if(noff > 1 && choice < 0) {
 			printf("ambiguous %d key layout (%d possible offsets):  ", n, noff);
 			for(j = 0; j < noff; j++)
 				printf("%d %c", off[j], j == noff-1 ? '\n' : ' ');
@@ -196,9 +195,13 @@ int scanl(unsigned char *data)
 			if(i < 0 || i >= noff)
 				exit(1);
 			while((j = getchar()) != '\n' && j != EOF);
+			choice = i;
 		}
-		goff = off[i];
-		printf("note offset: %d\n", goff);
+		if(choice >= noff) {
+			printf("weird keyboard\n");
+			exit(1);
+		}
+		goff = off[choice];
 	}
 	for(i = 0; i < n; i++) {
 		key[i].pos = bpos[i];
@@ -220,7 +223,7 @@ void keyscan(void)
 			exit(1);
 		}
 		frame(tms, 1);
-		printf("skipping %.3f\n", tms/1000.0);
+		printf("looking for keyboard %.3f\n", tms/1000.0);
 		tms += FS*5;
 		for(i = 0; i < YSLICE; i++) {
 			if(dbg)
@@ -237,8 +240,10 @@ void keyscan(void)
 		if(getchar() != 'y')
 			exit(1);
 	}
+	printf("note offset: %d\nkeys: %d\n", goff, nkey);
 	sprintf(cmdbuf, "yes | ffmpeg -i \"%s\" -filter:v \"crop=iw:2:0:%d\" tmp/out.mp4", vid, (int)(((double)j)/YSLICE*jpg.y));
 	system(cmdbuf);
+
 	e = 0;
 	while(!e && tms <= end) {
 		tms += FS;
