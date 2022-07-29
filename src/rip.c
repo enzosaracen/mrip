@@ -9,14 +9,13 @@
 #include <jpeglib.h>
 
 #define H		200
-#define W		1900
-#define FS		(1000.0/60.0)
+#define W		3000
 
+#define FS		(1000.0/60.0)
 #define YSLICE		20
-#define GRAYDIF		50
-#define KEYDIF		75
-#define COLDIF		100
-#define BIGDIF		150
+#define GRAYDIF		40
+#define COLDIF		75
+#define FFRAC		3
 
 typedef uint8_t uint8;
 typedef uint32_t uint32;
@@ -74,7 +73,7 @@ int isbw(uint8 *s)
 	sum = s[0]+s[1]+s[2];
 	if(sum <= 200)
 		return 0;
-	if(sum >= 500)
+	if(sum >= 600)
 		return 1;	
 	return -1;
 }
@@ -133,6 +132,9 @@ void frame(double t, int full)
 			j++;
 		}
 	}
+	jpeg_skip_scanlines(&info, jpg.y-info.output_scanline);
+	jpeg_finish_decompress(&info);
+	jpeg_destroy_decompress(&info);
 	pclose(fp);
 }
 
@@ -152,7 +154,7 @@ int scanl(unsigned char *data)
 	n = px = 0;
 	ps = data+(jpg.x/100-1)*3;
 	for(x = jpg.x/100; x < jpg.x; x++) {
-		if(ccmp(ps, data+x*3, KEYDIF) || x == jpg.x-1) {
+		if(ccmp(ps, data+x*3, COLDIF) || x == jpg.x-1) {
 			if(dbg && x < W)
 				for(i = 0; i < H/2; i++)
 					rast[i][x] = 0xe10600;
@@ -229,9 +231,12 @@ void keyscan(void)
 			if(dbg)
 				memset(rast, 0, W*H*sizeof(uint32));
 			if(scanl(jpg.jdata+i*3*jpg.x) == 0) {
-				e = 1;
+				if(dbg)
+					draw();
 				j = i;
-				draw();
+				if(e)
+					break;
+				e = 1;
 			}
 		}
 	}
@@ -240,8 +245,8 @@ void keyscan(void)
 		if(getchar() != 'y')
 			exit(1);
 	}
-	printf("note offset: %d\nkeys: %d\n", goff, nkey);
-	sprintf(cmdbuf, "yes | ffmpeg -i \"%s\" -filter:v \"crop=iw:2:0:%d\" tmp/out.mp4", vid, (int)(((double)j)/YSLICE*jpg.y));
+	printf("keys:\t%d\noffset:\t%d\ncropping...\n", nkey, goff);
+	sprintf(cmdbuf, "yes | ffmpeg -i \"%s\" -filter:v \"crop=iw:2:0:%d\" tmp/out.mp4 2>/dev/null", vid, (int)(((double)j)/YSLICE*jpg.y));
 	system(cmdbuf);
 
 	e = 0;
@@ -252,7 +257,7 @@ void keyscan(void)
 		if(dbg)
 			draw();
 		for(i = 0; i < nkey; i++) {
-			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, BIGDIF) && isbw(jpg.jdata+key[i].pos*3) < 0) {
+			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, COLDIF) && isbw(jpg.jdata+key[i].pos*3) < 0) {
 				e = 1;
 				send(i, 1);
 			}
@@ -282,7 +287,7 @@ int parse(void)
 		} else if(on[i])
 			sbuf[i] = 0;
 	}
-	if(oncnt > nkey/3)
+	if(oncnt > nkey/FFRAC)
 		return 1;
 	for(i = 0; i < nkey; i++)
 		if(sbuf[i] != -1)
@@ -320,7 +325,7 @@ int main(int argc, char *argv[])
 	keyscan();
 	while(tms <= end) {
 		if(parse()) {
-			printf("notes faded\n");
+			printf("ended with notes on > %d (likely fading)\n", nkey/FFRAC);
 			break;
 		}
 		printf("%.3f\n", tms/1000.0);
