@@ -9,10 +9,10 @@
 #include <jpeglib.h>
 
 #define H		200
-#define W		3000
+#define W		2000
 
 #define FS		(1000.0/60.0)
-#define YSLICE		20
+#define YSLICE		40
 #define GRAYDIF		40
 #define COLDIF		75
 #define FFRAC		3
@@ -112,16 +112,7 @@ void frame(double t, int full)
 		else
 			jpg.jdata = malloc(jpg.x*3);
 	}
-	if(!full) {
-		rowp[0] = jpg.jdata;
-		jpeg_read_scanlines(&info, rowp, 1);
-		if(dbg)
-			for(i = 0; i < jpg.x && i < W; i++) {
-				col = rgb(jpg.jdata+i*3);
-				for(j = H/2; j < H; j++)
-					rast[j][i] = col;
-			}
-	} else {
+	if(full) {
 		j = 0;
 		for(f = 0; f < 1; f += 1.0/YSLICE) {
 			i = f*(double)jpg.y;
@@ -131,6 +122,15 @@ void frame(double t, int full)
 			jpeg_read_scanlines(&info, rowp, 1);
 			j++;
 		}
+	} else {
+		rowp[0] = jpg.jdata;
+		jpeg_read_scanlines(&info, rowp, 1);
+		if(dbg)
+			for(i = 0; i < jpg.x && i < W; i++) {
+				col = rgb(jpg.jdata+i*3);
+				for(j = H/2; j < H; j++)
+					rast[j][i] = col;
+			}
 	}
 	jpeg_skip_scanlines(&info, jpg.y-info.output_scanline);
 	jpeg_finish_decompress(&info);
@@ -141,7 +141,7 @@ void frame(double t, int full)
 int scanl(unsigned char *data)
 {
 	int i, j, x, n, px, skip, bw[88], off[8], noff, bpos[88];
-	uint8 *ps, bcol[88][3];
+	uint8 bcol[88][3];
 	uint32 col;
 
 	if(dbg)
@@ -152,9 +152,8 @@ int scanl(unsigned char *data)
 		}
 
 	n = px = 0;
-	ps = data+(jpg.x/100-1)*3;
 	for(x = jpg.x/100; x < jpg.x; x++) {
-		if(ccmp(ps, data+x*3, COLDIF) || x == jpg.x-1) {
+		if(ccmp(data+(x-1)*3, data+x*3, COLDIF) || x == jpg.x-1) {
 			if(dbg && x < W)
 				for(i = 0; i < H/2; i++)
 					rast[i][x] = 0xe10600;
@@ -168,7 +167,6 @@ int scanl(unsigned char *data)
 			px = x;
 			x += skip;
 		}
-		ps = data+x*3;
 	}
 
 	if(n < 36)
@@ -187,23 +185,27 @@ int scanl(unsigned char *data)
 			}
 		if(noff == 0)
 			return 1;
-		i = 0;
-		if(noff > 1 && choice < 0) {
-			printf("ambiguous %d key layout (%d possible offsets):  ", n, noff);
-			for(j = 0; j < noff; j++)
-				printf("%d %c", off[j], j == noff-1 ? '\n' : ' ');
-			printf("enter choice (0-%d):\n", noff-1);
-			i = getchar()-'0';
-			if(i < 0 || i >= noff)
+		if(noff == 1)
+			goff = off[0];
+		else {
+			i = 0;
+			if(choice < 0) {
+				printf("ambiguous %d key layout (%d possible offsets):  ", n, noff);
+				for(j = 0; j < noff; j++)
+					printf("%d %c", off[j], j == noff-1 ? '\n' : ' ');
+				printf("enter choice (0-%d):\n", noff-1);
+				i = getchar()-'0';
+				if(i < 0 || i >= noff)
+					exit(1);
+				while((j = getchar()) != '\n' && j != EOF);
+				choice = i;
+			}
+			if(choice >= noff) {
+				printf("weird keyboard\n");
 				exit(1);
-			while((j = getchar()) != '\n' && j != EOF);
-			choice = i;
+			}
+			goff = off[choice];
 		}
-		if(choice >= noff) {
-			printf("weird keyboard\n");
-			exit(1);
-		}
-		goff = off[choice];
 	}
 	for(i = 0; i < n; i++) {
 		key[i].pos = bpos[i];
@@ -226,19 +228,17 @@ void keyscan(void)
 		}
 		frame(tms, 1);
 		printf("looking for keyboard %.3f\n", tms/1000.0);
-		tms += FS*5;
 		for(i = 0; i < YSLICE; i++) {
 			if(dbg)
 				memset(rast, 0, W*H*sizeof(uint32));
-			if(scanl(jpg.jdata+i*3*jpg.x) == 0) {
+			if(scanl(jpg.jdata+i*jpg.x*3) == 0) {
 				if(dbg)
 					draw();
 				j = i;
-				if(e)
-					break;
 				e = 1;
 			}
 		}
+		tms += FS*5;
 	}
 	if(dbg) {
 		printf("keyboard %d (y/n)?\n", nkey);
@@ -325,7 +325,7 @@ int main(int argc, char *argv[])
 	keyscan();
 	while(tms <= end) {
 		if(parse()) {
-			printf("ended with notes on > %d (likely fading)\n", nkey/FFRAC);
+			printf("ended with notes on > %d\n", nkey/FFRAC);
 			break;
 		}
 		printf("%.3f\n", tms/1000.0);
