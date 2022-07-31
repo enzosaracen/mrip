@@ -19,15 +19,15 @@
 
 typedef uint8_t uint8;
 typedef uint32_t uint32;
+typedef struct Kinf {
+	int pos;
+	uint8 col[3];
+} Kinf;
 
 FILE *fout;
 int dbg = 1;
 int on[88], piano[88], goff, nkey, choice = -1;
 int octave[12] = {1,0,1,0,1,1,0,1,0,1,0,1};
-struct {
-	int pos;
-	uint8 col[3];
-} key[88];
 struct {
 	uint8 *jdata;		
 	unsigned x, y;
@@ -35,6 +35,7 @@ struct {
 double tms;
 unsigned end;
 char *vid, cmdbuf[512];
+Kinf key[88];
 
 uint32 rast[H][W];
 SDL_Surface *scr;
@@ -138,10 +139,9 @@ void frame(double t, int full)
 	pclose(fp);
 }
 
-int scanl(unsigned char *data)
+int scanl(unsigned char *data, Kinf *k)
 {
-	int i, j, x, n, px, skip, bw[88], off[8], noff, bpos[88];
-	uint8 bcol[88][3];
+	int i, j, x, n, px, skip, bw[88], off[8], noff;
 	uint32 col;
 
 	if(dbg)
@@ -159,9 +159,9 @@ int scanl(unsigned char *data)
 					rast[i][x] = 0xe10600;
 			if(n >= 88)
 				return 1;
-			bpos[n] = (px+x)/2;
+			k[n].pos = (px+x)/2;
 			for(i = 0; i < 3; i++)
-				bcol[n][i] = jpg.jdata[bpos[n]*3+i];
+				k[n].col[i] = jpg.jdata[k[n].pos*3+i];
 			n++;
 			skip = (x-px)/2;
 			px = x;
@@ -172,7 +172,7 @@ int scanl(unsigned char *data)
 	if(n < 36)
 		return 1;
 	for(i = 0; i < n; i++)
-		if((bw[i] = isbw(data+bpos[i]*3)) < 0)
+		if((bw[i] = isbw(data+k[i].pos*3)) < 0)
 			return 1;
 	if(n < 88) {
 		noff = 0;
@@ -207,10 +207,9 @@ int scanl(unsigned char *data)
 			goff = off[choice];
 		}
 	}
-	for(i = 0; i < n; i++) {
-		key[i].pos = bpos[i];
-		for(j = 0; j < 3; j++)
-			key[i].col[j] = bcol[i][j];
+	if(nkey != 0 && n != nkey) {
+		printf("weird keybaord\n");
+		exit(1);
 	}
 	nkey = n;
 	return 0;
@@ -218,10 +217,11 @@ int scanl(unsigned char *data)
 
 void keyscan(void)
 {
-	int i, j, e;
+	int i, j, nk, ypos[88];
+	Kinf k[YSLICE][88];
 
-	e = 0;
-	while(!e) {
+	nk = 0;
+	while(nk == 0) {
 		if(tms >= end) {
 			printf("no keyboard found\n");
 			exit(1);
@@ -231,14 +231,19 @@ void keyscan(void)
 		for(i = 0; i < YSLICE; i++) {
 			if(dbg)
 				memset(rast, 0, W*H*sizeof(uint32));
-			if(scanl(jpg.jdata+i*jpg.x*3) == 0) {
+			if(scanl(jpg.jdata+i*jpg.x*3, k[nk]) == 0) {
 				if(dbg)
 					draw();
-				j = i;
-				e = 1;
+				ypos[nk++] = i;
 			}
 		}
 		tms += FS*5;
+	}
+	nk /= 2;
+	for(i = 0; i < 88; i++) {
+		key[i].pos = k[nk][i].pos;
+		for(j = 0; j < 3; j++)
+			key[i].col[j] = k[nk][i].col[j];
 	}
 	if(dbg) {
 		printf("keyboard %d (y/n)?\n", nkey);
@@ -246,11 +251,11 @@ void keyscan(void)
 			exit(1);
 	}
 	printf("keys:\t%d\noffset:\t%d\ncropping...\n", nkey, goff);
-	sprintf(cmdbuf, "yes | ffmpeg -i \"%s\" -filter:v \"crop=iw:2:0:%d\" tmp/out.mp4 2>/dev/null", vid, (int)(((double)j)/YSLICE*jpg.y));
+	sprintf(cmdbuf, "yes | ffmpeg -i \"%s\" -filter:v \"crop=iw:2:0:%d\" tmp/out.mp4 2>/dev/null", vid, (int)(((double)ypos[nk]/YSLICE*jpg.y)));
 	system(cmdbuf);
 
-	e = 0;
-	while(!e && tms <= end) {
+	nk = 0;
+	while(nk == 0 && tms <= end) {
 		tms += FS;
 		printf("waiting for note %.3f\n", tms/1000.0);
 		frame(tms, 0);
@@ -258,10 +263,10 @@ void keyscan(void)
 			draw();
 		for(i = 0; i < nkey; i++) {
 			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, COLDIF) && isbw(jpg.jdata+key[i].pos*3) < 0) {
-				e = 1;
+				nk = 1;
 				send(i, 1);
 			}
-			if(!e)
+			if(nk == 0)
 				for(j = 0; j < 3; j++)
 					key[i].col[j] = jpg.jdata[key[i].pos*3+j];
 		}
