@@ -13,9 +13,9 @@
 
 #define FS		(1000.0/60.0)
 #define YSLICE		60
-#define GRAYDIF		40
+#define GRAYDIF		50
 #define COLDIF		75
-#define KEYDIF		300
+#define KEYDIF		200
 #define BSUM		200
 #define WSUM		600
 #define FFRAC		3
@@ -213,7 +213,6 @@ int scanl(unsigned char *data, Kinf *k)
 	if(nkey != 0 && n != nkey) {
 		draw();
 		printf("weird keyboard (nkey)\n");
-		getchar();
 		exit(1);
 	}
 	nkey = n;
@@ -248,10 +247,6 @@ void keyscan(void)
 				cont = 0;
 			if(nk > 0 && i == YSLICE-1)
 				cont = 0;
-			if(tms > 3000 && i == 52) {
-				draw();
-				getchar();
-			}
 		}
 		if(cont == -1)
 			printf("fragmented keyboard %.3f\n", tms/1000.0);
@@ -277,14 +272,14 @@ void keyscan(void)
 	system(cmdbuf);
 
 	nk = 0;
-	while(nk == 0 && tms <= end) {
+	while(nk == 0 && tms < end) {
 		tms += FS;
 		printf("waiting for note %.3f\n", tms/1000.0);
 		frame(tms, 0);
 		if(dbg)
 			draw();
 		for(i = 0; i < nkey; i++) {
-			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, COLDIF) && isbw(jpg.jdata+key[i].pos*3) < 0) {
+			if(ccmp(key[i].col, jpg.jdata+key[i].pos*3, COLDIF) && isbw(jpg.jdata+key[i].pos*3) == -1) {
 				nk = 1;
 				send(i, 1);
 			}
