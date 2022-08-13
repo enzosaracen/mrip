@@ -12,10 +12,14 @@
 #define W		2000
 
 #define FS		(1000.0/60.0)
-#define YSLICE		40
+#define YSLICE		60
 #define GRAYDIF		40
 #define COLDIF		75
+#define KEYDIF		300
+#define BSUM		200
+#define WSUM		600
 #define FFRAC		3
+#define MINKB		3
 
 typedef uint8_t uint8;
 typedef uint32_t uint32;
@@ -34,7 +38,7 @@ struct {
 } jpg;
 double tms;
 unsigned end;
-char *vid, cmdbuf[512];
+char *vidpath, cmdbuf[512];
 Kinf key[88];
 
 uint32 rast[H][W];
@@ -72,9 +76,9 @@ int isbw(uint8 *s)
 	if(abs(s[0]-(s[1]+s[2])/2) > GRAYDIF || abs(s[1]-(s[0]+s[2])/2) > GRAYDIF || abs(s[2]-(s[0]+s[1])/2) > GRAYDIF) 
 		return -1;
 	sum = s[0]+s[1]+s[2];
-	if(sum <= 200)
+	if(sum <= BSUM)
 		return 0;
-	if(sum >= 600)
+	if(sum >= WSUM)
 		return 1;	
 	return -1;
 }
@@ -91,11 +95,11 @@ void frame(double t, int full)
 	double f;
 	uint32 col;
 	FILE *fp;
-	unsigned char *rowp[1];
+	uint8 *rowp[1];
 	struct jpeg_error_mgr err;
 	struct jpeg_decompress_struct info;
 
-	sprintf(cmdbuf, "ffmpeg -ss %.3f -i \"%s\" -qscale:v 4 -frames:v 1 -f image2 pipe:1 2>/dev/null", t/1000.0, full ? vid : "tmp/out.mp4");
+	sprintf(cmdbuf, "ffmpeg -ss %.3f -i \"%s\" -qscale:v 4 -frames:v 1 -f image2 pipe:1 2>/dev/null", t/1000.0, full ? vidpath : "tmp/out.mp4");
 	fp = popen(cmdbuf, "r");
 	info.err = jpeg_std_error(&err);
 	jpeg_create_decompress(&info);
@@ -116,10 +120,10 @@ void frame(double t, int full)
 	if(full) {
 		j = 0;
 		for(f = 0; f < 1; f += 1.0/YSLICE) {
-			i = f*(double)jpg.y;
+			i = f*jpg.y;
 			if(i-info.output_scanline > 0)
 				jpeg_skip_scanlines(&info, i-info.output_scanline);
-			rowp[0] = jpg.jdata + j*3*jpg.x;
+			rowp[0] = jpg.jdata + j*jpg.x*3;
 			jpeg_read_scanlines(&info, rowp, 1);
 			j++;
 		}
@@ -151,29 +155,28 @@ int scanl(unsigned char *data, Kinf *k)
 				rast[j][i] = col;
 		}
 
+	skip = jpg.x/200;	/* first few pixels can be bad */
 	n = px = 0;
-	for(x = jpg.x/100; x < jpg.x; x++) {
-		if(ccmp(data+(x-1)*3, data+x*3, COLDIF) || x == jpg.x-1) {
+	for(x = skip+1; x < jpg.x; x++) {
+		if(ccmp(data+x*3, data+skip*3, KEYDIF) || x == jpg.x-1) {
 			if(dbg && x < W)
 				for(i = 0; i < H/2; i++)
-					rast[i][x] = 0xe10600;
+					rast[i][x] = 0xff00000;
 			if(n >= 88)
 				return 1;
 			k[n].pos = (px+x)/2;
+			if((bw[n] = isbw(data+k[n].pos*3)) == -1)
+				return 1;
 			for(i = 0; i < 3; i++)
-				k[n].col[i] = jpg.jdata[k[n].pos*3+i];
+				k[n].col[i] = data[k[n].pos*3+i];
 			n++;
-			skip = (x-px)/2;
+			skip = x+(x-px)/3;
 			px = x;
-			x += skip;
+			x = skip;
 		}
 	}
-
 	if(n < 36)
 		return 1;
-	for(i = 0; i < n; i++)
-		if((bw[i] = isbw(data+k[i].pos*3)) < 0)
-			return 1;
 	if(n < 88) {
 		noff = 0;
 		for(i = 0; i < 88-n; i++)
@@ -201,14 +204,16 @@ int scanl(unsigned char *data, Kinf *k)
 				choice = i;
 			}
 			if(choice >= noff) {
-				printf("weird keyboard\n");
+				printf("weird keyboard (offset)\n");
 				exit(1);
 			}
 			goff = off[choice];
 		}
 	}
 	if(nkey != 0 && n != nkey) {
-		printf("weird keybaord\n");
+		draw();
+		printf("weird keyboard (nkey)\n");
+		getchar();
 		exit(1);
 	}
 	nkey = n;
@@ -217,30 +222,47 @@ int scanl(unsigned char *data, Kinf *k)
 
 void keyscan(void)
 {
-	int i, j, nk, ypos[88];
+	int i, j, nk, ypos[88], cont;
 	Kinf k[YSLICE][88];
 
-	nk = 0;
-	while(nk == 0) {
+	do {
 		if(tms >= end) {
 			printf("no keyboard found\n");
 			exit(1);
 		}
 		frame(tms, 1);
-		printf("looking for keyboard %.3f\n", tms/1000.0);
+		nk = 0;
+		cont = 1;
 		for(i = 0; i < YSLICE; i++) {
 			if(dbg)
 				memset(rast, 0, W*H*sizeof(uint32));
 			if(scanl(jpg.jdata+i*jpg.x*3, k[nk]) == 0) {
 				if(dbg)
 					draw();
+				if(!cont) {
+					cont = -1;
+					break;
+				}
 				ypos[nk++] = i;
+			} else if(nk > 0)
+				cont = 0;
+			if(nk > 0 && i == YSLICE-1)
+				cont = 0;
+			if(tms > 3000 && i == 52) {
+				draw();
+				getchar();
 			}
 		}
+		if(cont == -1)
+			printf("fragmented keyboard %.3f\n", tms/1000.0);
+		else if(cont == 1)
+			printf("looking for keyboard %.3f\n", tms/1000.0);
+		else if(nk < MINKB)
+			printf("keyboard too short %.3f\n", tms/1000.0);
 		tms += FS*5;
-	}
-	nk /= 2;
-	for(i = 0; i < 88; i++) {
+	} while(cont || nk < MINKB);
+	nk = nk*0.75;
+	for(i = 0; i < nkey; i++) {
 		key[i].pos = k[nk][i].pos;
 		for(j = 0; j < 3; j++)
 			key[i].col[j] = k[nk][i].col[j];
@@ -251,7 +273,7 @@ void keyscan(void)
 			exit(1);
 	}
 	printf("keys:\t%d\noffset:\t%d\ncropping...\n", nkey, goff);
-	sprintf(cmdbuf, "yes | ffmpeg -i \"%s\" -filter:v \"crop=iw:2:0:%d\" tmp/out.mp4 2>/dev/null", vid, (int)(((double)ypos[nk]/YSLICE*jpg.y)));
+	sprintf(cmdbuf, "yes | ffmpeg -i \"%s\" -filter:v \"crop=iw:2:0:%d\" tmp/out.mp4 2>/dev/null", vidpath, (int)((double)ypos[nk]/YSLICE*jpg.y));
 	system(cmdbuf);
 
 	nk = 0;
@@ -285,7 +307,7 @@ int parse(void)
 		if(t) {
 			if(dbg)
 				for(j = 0; j < H/2; j++)
-					rast[j][key[i].pos] = 0xe10600;
+					rast[j][key[i].pos] = 0xff00000;
 			oncnt++;
 			if(!on[i])
 				sbuf[i] = 1;
@@ -308,7 +330,7 @@ int main(int argc, char *argv[])
 
 	if(argc != 3)
 		return 1;
-	vid = argv[1];
+	vidpath = argv[1];
 	end = atof(argv[2])*1000;
 	fout = fopen("tmp/nout", "w");
 	if(dbg) {
