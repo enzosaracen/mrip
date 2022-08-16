@@ -155,7 +155,7 @@ int scanl(unsigned char *data, Kinf *k)
 				rast[j][i] = col;
 		}
 
-	skip = jpg.x/200;	/* first few pixels can be bad */
+	skip = jpg.x/200;
 	n = px = 0;
 	for(x = skip+1; x < jpg.x; x++) {
 		if(ccmp(data+x*3, data+skip*3, KEYDIF) || x == jpg.x-1) {
@@ -239,7 +239,7 @@ void keyscan(void)
 				if(dbg)
 					draw();
 				if(!cont) {
-					cont = -1;
+					cont = nk >= MINKB ? 2 : -1;
 					break;
 				}
 				ypos[nk++] = i;
@@ -252,10 +252,12 @@ void keyscan(void)
 			printf("fragmented keyboard %.3f\n", tms/1000.0);
 		else if(cont == 1)
 			printf("looking for keyboard %.3f\n", tms/1000.0);
+		else if(cont == 2)
+			printf("fragmented but long enough (%d slices) %.3f\n", nk, tms/1000.0);
 		else if(nk < MINKB)
 			printf("keyboard too short %.3f\n", tms/1000.0);
 		tms += FS*5;
-	} while(cont || nk < MINKB);
+	} while((cont != 0 && cont != 2) || nk < MINKB);
 	nk = nk*0.75;
 	for(i = 0; i < nkey; i++) {
 		key[i].pos = k[nk][i].pos;
@@ -272,8 +274,7 @@ void keyscan(void)
 	system(cmdbuf);
 
 	nk = 0;
-	while(nk == 0 && tms < end) {
-		tms += FS;
+	while(nk == 0 && tms <= end) {
 		printf("waiting for note %.3f\n", tms/1000.0);
 		frame(tms, 0);
 		if(dbg)
@@ -287,6 +288,7 @@ void keyscan(void)
 				for(j = 0; j < 3; j++)
 					key[i].col[j] = jpg.jdata[key[i].pos*3+j];
 		}
+		tms += FS;
 	}
 }
 
