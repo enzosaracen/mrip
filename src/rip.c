@@ -29,7 +29,7 @@ typedef struct Kinf {
 } Kinf;
 
 FILE *fout;
-int dbg = 1;
+int dbg = 0;
 int on[88], piano[88], goff, nkey, choice = -1;
 int octave[12] = {1,0,1,0,1,1,0,1,0,1,0,1};
 struct {
@@ -302,7 +302,7 @@ int parse(void)
 		sbuf[i] = -1;
 		t = ccmp(jpg.jdata+key[i].pos*3, key[i].col, COLDIF);
 		if(t) {
-			if(dbg)
+			if(dbg && key[i].pos < W)
 				for(j = 0; j < H/2; j++)
 					rast[j][key[i].pos] = 0xff00000;
 			oncnt++;
